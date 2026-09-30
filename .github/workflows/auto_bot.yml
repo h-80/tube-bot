@@ -1,0 +1,30 @@
+name: Alfaham Tube Auto Bot
+
+on:
+  schedule:
+    # هذا السطر يجعل البوت يعمل تلقائياً كل ساعة تماماً بدون أي تدخل منك
+    - cron: '0 * * * *'
+  workflow_dispatch: # يتيح لك تشغيله يدوياً للاختبار متى شئت
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests google-generativeai
+
+      - name: Run Bot Script
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python bot.py
