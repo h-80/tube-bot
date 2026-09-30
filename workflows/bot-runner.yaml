@@ -2,9 +2,8 @@ name: Automated YouTube & Gemini Bot
 
 on:
   schedule:
-    # يعمل تلقائياً كل يوم مرة واحدة
     - cron: '0 0 * * *'
-  workflow_dispatch: # يتيح لك تشغيله يدوياً متى شئت بضغطة زر
+  workflow_dispatch:
 
 jobs:
   run-bot:
