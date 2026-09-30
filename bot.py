@@ -15,8 +15,9 @@ if not YOUTUBE_API_KEY or not GEMINI_API_KEY:
 
 # إعداد جيميناي
 genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-pro')
 
-# 1. جلب الأقسام من Firebase لمعرفة الهيكلية
+# 1. جلب الأقسام من Firebase لمعرفة الهيكلية الحقيقية للموقع
 categories_response = requests.get(f"{FIREBASE_URL}/categories.json")
 categories = {}
 if categories_response.status_code == 200 and categories_response.json():
@@ -26,7 +27,7 @@ else:
     print("Error: No categories found in Firebase.")
     exit(1)
 
-# 2. جلب أحدث الفيديوهات من يوتيوب
+# 2. جلب أحدث الفيديوهات من يوتيوب (بما أن الفيديوهات حديثة ودورية)
 youtube_url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=1&order=date&type=video&key={YOUTUBE_API_KEY}"
 response = requests.get(youtube_url)
 
@@ -40,14 +41,13 @@ if response.status_code == 200:
         thumbnail_url = video['snippet']['thumbnails']['high']['url']
         print(f"Latest video found: {title}")
         
-        # 3. إعداد الأقسام للذكاء الاصطناعي
+        # 3. إعداد الأقسام الحقيقية للذكاء الاصطناعي
         categories_list_str = ""
         for cat_id, cat_data in categories.items():
             cat_name = cat_data.get('name', '')
             categories_list_str += f"- ID: {cat_id} | Name: {cat_name}\n"
 
-        # 4. استخدام Gemini لتصنيف الفيديو
-        model = genai.GenerativeModel('gemini-pro')
+        # 4. استخدام Gemini لتصنيف الفيديو ضمن أقسامك الحقيقية
         prompt = f"""
 Analyze this YouTube video title:
 "{title}"
@@ -66,7 +66,7 @@ Return ONLY the Category ID string and nothing else.
         else:
             print(f"Selected Category ID: {selected_category_id}")
 
-        # توليد وصف احترافي
+        # توليد وصف احترافي بالعربية
         desc_prompt = f"Write an engaging Arabic description and short article summary for this video title: {title}"
         desc_response = model.generate_content(desc_prompt)
         enhanced_description = desc_response.text
