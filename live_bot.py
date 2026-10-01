@@ -1,3 +1,4 @@
+import html
 import os
 import re
 
@@ -7,6 +8,7 @@ from bot import (
     firebase_delete,
     firebase_get,
     firebase_put,
+    generate_description,
     publish_video,
     youtube,
 )
@@ -137,15 +139,19 @@ def load_source_channels(categories, articles):
 def load_upload_playlists(channel_ids):
     if not channel_ids:
         return {}
-    response = youtube(
-        "channels",
-        {"part": "contentDetails", "id": ",".join(channel_ids), "maxResults": 50},
-    )
-    return {
-        item["id"]: (((item.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads"))
-        for item in response.get("items", [])
-        if ((item.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
-    }
+    playlists = {}
+    for start in range(0, len(channel_ids), 50):
+        batch = channel_ids[start:start + 50]
+        response = youtube(
+            "channels",
+            {"part": "contentDetails", "id": ",".join(batch), "maxResults": 50},
+        )
+        playlists.update({
+            item["id"]: (((item.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads"))
+            for item in response.get("items", [])
+            if ((item.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
+        })
+    return playlists
 
 
 def find_live_videos(sources):
@@ -181,6 +187,66 @@ def find_live_videos(sources):
                 }
                 break
     return live_videos
+
+
+def replace_article_live(article_id, old_article, category, video):
+    video_url = f"https://www.youtube.com/watch?v={video['id']}"
+    description = generate_description(video["title"], category["name"])
+    updated_article = {
+        **(old_article or {}),
+        "title": video["title"],
+        "categoryId": category["id"],
+        "imageUrl": video["thumbnail"],
+        "url": "",
+        "videoId": video["id"],
+        "videoUrl": video_url,
+        "videoUrls": [video_url],
+        "content": f"<p><strong>بث مباشر الآن</strong></p><p>{html.escape(description)}</p>",
+        "source": (old_article or {}).get("source") or "YouTube live",
+        "isLive": True,
+        "updatedAt": {".sv": "timestamp"},
+    }
+    firebase_put(f"articles/{article_id}", updated_article)
+
+
+def sync_existing_live_articles(articles, categories, live_videos):
+    return set()
+
+    article_ids = [
+        article_video_id(article or {})
+        for article in articles.values()
+        if article_video_id(article or {})
+        and (article.get("isLive") is True or article.get("categoryId") in categories)
+    ]
+    details = get_video_details_batched(article_ids)
+    consumed_replacements = set()
+
+    for article_id, article in articles.items():
+        article = article or {}
+        category_id = article.get("categoryId")
+        if not (article.get("isLive") is True or category_id in categories):
+            continue
+
+        old_video_id = article_video_id(article)
+        old_detail = details.get(old_video_id) or {}
+        old_snippet = old_detail.get("snippet") or {}
+        channel_id = old_snippet.get("channelId")
+        old_state = old_snippet.get("liveBroadcastContent")
+
+        if old_state == "live":
+            continue
+
+        replacement = live_videos.get(channel_id) if channel_id else None
+        category = categories.get(category_id)
+        if replacement and replacement["id"] != old_video_id and category:
+            replace_article_live(article_id, article, category, replacement)
+            consumed_replacements.add(replacement["id"])
+            continue
+
+        if old_detail and old_state != "live":
+            firebase_delete(f"articles/{article_id}")
+
+    return consumed_replacements
 
 
 def search_external_live_videos(sources, existing_live_videos):
@@ -230,15 +296,15 @@ def run_once():
 
     articles = load_articles()
     sources = load_source_channels(categories, articles)
-    remove_ended_live_articles(articles, categories)
-    articles = load_articles()
-    used_ids = {article_video_id(article or {}) for article in articles.values() if article_video_id(article or {})}
     live_videos = find_live_videos(sources)
     external_live_videos = search_external_live_videos(sources, live_videos)
     live_videos.update(external_live_videos)
+    replaced_ids = sync_existing_live_articles(articles, categories, live_videos)
+    articles = load_articles()
+    used_ids = {article_video_id(article or {}) for article in articles.values() if article_video_id(article or {})}
 
     for channel_id, video in live_videos.items():
-        if video["id"] in used_ids:
+        if video["id"] in used_ids or video["id"] in replaced_ids:
             continue
         category = categories.get(sources[channel_id]["categoryId"])
         if not category:
