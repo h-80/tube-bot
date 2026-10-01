@@ -12,8 +12,10 @@ SOURCES_FILE = os.getenv("SERIES_SOURCES_FILE", "مسلسلات.txt")
 REQUEST_TIMEOUT = 30
 SERIES_WORDS = (
     "مسلسل", "المسلسل", "مسلسلات", "حلقة", "الحلقة", "حلقات", "جميع الحلقات",
-    "كل الحلقات", "الحلقات كاملة", "حلقات كاملة", "جميع حلقات", "episode", "episodes", "full episodes",
-    "complete episodes", "ep", "season", "الموسم",
+    "كل الحلقات", "الحلقات كاملة", "حلقات كاملة", "جميع حلقات", "جميع الحلقات",
+    "موسم", "الموسم", "مواسم", "المواسم", "جميع المواسم", "كل المواسم", "الموسم الكامل",
+    "episode", "episodes", "full episodes", "complete episodes", "full season", "complete season",
+    "season", "ep",
 )
 REJECTED_WORDS = ("برنامج", "برامج", "لقاء", "مقابلة", "إعلان", "اعلان", "تريلر", "ملخص", "مقطع", "أغنية", "اغنية", "promo", "trailer", "recap", "summary")
 
