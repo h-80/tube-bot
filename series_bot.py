@@ -84,7 +84,10 @@ def get_playlists(channel_handle):
         return []
     channel_id = channels[0]["id"]
     playlists = youtube("playlists", {"part": "snippet", "channelId": channel_id, "maxResults": 50}).get("items", [])
-    return [item for item in playlists if playlist_is_series((item.get("snippet") or {}).get("title", ""))]
+    return [
+        item for item in playlists
+        if not any(word in normalize((item.get("snippet") or {}).get("title", "")) for word in REJECTED_WORDS)
+    ]
 
 
 def get_playlist_episodes(playlist_id):
