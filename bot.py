@@ -3,6 +3,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import requests
 
@@ -17,6 +18,7 @@ FIREBASE_URL = os.getenv(
 MAX_DAILY_POSTS = 10
 REQUEST_TIMEOUT = 30
 MIN_FILM_SECONDS = 40 * 60
+KIDS_LIVE_CHANNELS_FILE = os.getenv("KIDS_LIVE_CHANNELS_FILE", "قنوات أطفال بث مباشر.txt")
 REJECTED_TITLE_WORDS = (
     "مقطع", "مشهد", "تريلر", "إعلان", "اعلان", "برومو", "تشويقي",
     "trailer", "clip", "promo", "teaser", "episode", "حلقة", "الحلقة", "مسلسل",
@@ -240,6 +242,66 @@ def live_search_phrase(category):
     return "بث مباشر"
 
 
+def is_kids_live_category(category):
+    text = normalize(category.get("search_name") or category.get("name"))
+    return ("طفل" in text or "اطفال" in text or "أطفال" in text or "كرتون" in text) and ("بث" in text or "مباشر" in text)
+
+
+def load_kids_live_channels():
+    try:
+        with open(KIDS_LIVE_CHANNELS_FILE, encoding="utf-8") as file:
+            return [line.strip() for line in file if line.strip() and line.strip().startswith("http")]
+    except OSError:
+        return []
+
+
+def resolve_channel_id_from_url(url):
+    parsed = urlparse(url)
+    if parsed.netloc.endswith("youtube.com") or parsed.netloc.endswith("www.youtube.com"):
+        path = parsed.path.strip("/")
+        if path.startswith("@"):
+            handle = path[1:]
+            result = youtube("channels", {"part": "id", "forHandle": f"@{handle}"}).get("items", [])
+            return (result[0] or {}).get("id") if result else None
+        if path:
+            result = youtube("channels", {"part": "id", "forUsername": path}).get("items", [])
+            return (result[0] or {}).get("id") if result else None
+    return None
+
+
+def search_kids_live_video(category, used_ids):
+    for channel_url in load_kids_live_channels():
+        channel_id = resolve_channel_id_from_url(channel_url)
+        if not channel_id:
+            continue
+        response = youtube(
+            "search",
+            {
+                "part": "snippet",
+                "channelId": channel_id,
+                "eventType": "live",
+                "type": "video",
+                "order": "date",
+                "maxResults": 10,
+            },
+        )
+        for item in response.get("items", []):
+            video_id = (item.get("id") or {}).get("videoId")
+            if not video_id or video_id in used_ids:
+                continue
+            title = str((item.get("snippet") or {}).get("title", "")).strip()
+            if any(word in normalize(title) for word in ("مقابلة", "لقاء", "رياضة", "موسيقى", "اغنية", "تريلر", "إعلان", "اعلان")):
+                continue
+            return {
+                "id": video_id,
+                "title": title or "بث مباشر أطفال",
+                "description": str((item.get("snippet") or {}).get("description", "")).strip(),
+                "thumbnail": ((item.get("snippet") or {}).get("thumbnails") or {}).get("high", {}).get("url", ""),
+                "duration": 0,
+            }
+    return None
+
+
 def get_video_details(video_ids):
     if not video_ids:
         return {}
@@ -438,7 +500,7 @@ def run_once():
     category = choose_category(categories)
     used_ids = used_video_ids(load_articles())
     log(f"Searching one video for: {category['name']}")
-    video = search_video(category, used_ids)
+    video = search_kids_live_video(category, used_ids) if is_kids_live_category(category) else search_video(category, used_ids)
     if not video:
         log("No new video found for this category; nothing was published")
         return
