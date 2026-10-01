@@ -10,14 +10,26 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 FIREBASE_URL = os.getenv("FIREBASE_URL", "https://alfaham-tube-web-default-rtdb.firebaseio.com").rstrip("/")
 SOURCES_FILE = os.getenv("SERIES_SOURCES_FILE", "مسلسلات.txt")
 REQUEST_TIMEOUT = 30
-SERIES_WORDS = (
-    "مسلسل", "المسلسل", "مسلسلات", "حلقة", "الحلقة", "حلقات", "جميع الحلقات",
-    "كل الحلقات", "الحلقات كاملة", "حلقات كاملة", "جميع حلقات", "جميع الحلقات",
-    "موسم", "الموسم", "مواسم", "المواسم", "جميع المواسم", "كل المواسم", "الموسم الكامل",
-    "episode", "episodes", "full episodes", "complete episodes", "full season", "complete season",
-    "season", "ep",
+SERIES_STRONG_WORDS = (
+    "مسلسل", "المسلسل", "مسلسلات", "المسلسلات", "سلسلة", "السلسلة",
+    "مسلسلات عربية", "جميع الحلقات", "كل الحلقات", "الحلقات", "حلقات",
+    "حلقات كاملة", "الحلقات كاملة", "جميع حلقات", "مسلسل كامل",
+    "الموسم", "موسم", "المواسم", "مواسم", "الحلقة كاملة", "جميع المواسم",
+    "الجزء", "الفصل", "المدبلج", "المترجم", "المدبلجة", "المترجمة",
+    "series", "drama",
 )
-REJECTED_WORDS = ("برنامج", "برامج", "لقاء", "مقابلة", "إعلان", "اعلان", "تريلر", "ملخص", "مقطع", "أغنية", "اغنية", "promo", "trailer", "recap", "summary")
+SERIES_WEAK_WORDS = (
+    "حلقة", "الحلقة", "حلقات", "موسم", "الموسم", "مواسم", "المواسم",
+    "episode", "episodes", "season", "seasons", "ep",
+)
+SERIES_NUMERIC_PATTERNS = (
+    r"(?:حلقة|الحلقة|episode|episodes|ep)\s*[:#-]?\s*\d{1,3}",
+    r"(?:موسم|الموسم|season|seasons)\s*[:#-]?\s*\d{1,3}",
+    r"\d{1,3}\s*(?:حلقة|الحلقة|episode|episodes|ep)",
+    r"\d{1,3}\s*(?:موسم|الموسم|season|seasons)",
+    r"(?:الجزء|الفصل)\s*\d{1,3}",
+)
+REJECTED_WORDS = ("برنامج", "برامج", "لقاء", "مقابلة", "إعلان", "اعلان", "تريلر", "ملخص", "مقطع", "أغنية", "اغنية", "promo", "trailer", "recap", "summary", "رياضة", "كرة", "مباراة")
 
 
 def normalize(value):
@@ -61,22 +73,46 @@ def handle_from_url(url):
     return match.group(1) if match else ""
 
 
+def has_series_marker(value):
+    return any(word in value for word in SERIES_STRONG_WORDS) or any(word in value for word in SERIES_WEAK_WORDS)
+
+
+def has_numeric_series_pattern(value):
+    return any(re.search(pattern, value) for pattern in SERIES_NUMERIC_PATTERNS)
+
+
+def is_strong_series_context(value, playlist_value=""):
+    if any(word in value for word in SERIES_STRONG_WORDS):
+        return True
+    if not any(word in value for word in SERIES_WEAK_WORDS):
+        return False
+    return bool(
+        any(word in playlist_value for word in SERIES_STRONG_WORDS)
+        and has_numeric_series_pattern(value)
+    )
+
+
 def series_video_title(title, playlist_title=""):
     value = normalize(title)
+    playlist_value = normalize(playlist_title)
     if any(word in value for word in REJECTED_WORDS):
         return False
-    if any(word in value for word in SERIES_WORDS):
+    if is_strong_series_context(value, playlist_value):
         return True
-    playlist_value = normalize(playlist_title)
-    return bool(
-        any(word in playlist_value for word in SERIES_WORDS)
-        and re.search(r"(?:^|\s)(?:الحلقة\s*)?\d{1,3}(?:\s|$)", value)
-    )
+    if any(word in playlist_value for word in SERIES_STRONG_WORDS) and has_numeric_series_pattern(value):
+        return True
+    return False
 
 
 def playlist_is_series(title):
     value = normalize(title)
-    return not any(word in value for word in REJECTED_WORDS) and any(word in value for word in SERIES_WORDS)
+    if any(word in value for word in REJECTED_WORDS):
+        return False
+    if any(word in value for word in SERIES_STRONG_WORDS):
+        return True
+    if not any(word in value for word in SERIES_WEAK_WORDS):
+        return False
+    return has_numeric_series_pattern(value)
 
 
 def get_category_id(section, categories):
@@ -96,7 +132,7 @@ def get_playlists(channel_handle):
     playlists = youtube("playlists", {"part": "snippet", "channelId": channel_id, "maxResults": 50}).get("items", [])
     return [
         item for item in playlists
-        if not any(word in normalize((item.get("snippet") or {}).get("title", "")) for word in REJECTED_WORDS)
+        if playlist_is_series((item.get("snippet") or {}).get("title", ""))
     ]
 
 
