@@ -151,17 +151,31 @@ def publish_or_update_series(playlist, category_id, section):
         log(f"Published {playlist_title}: {len(urls)} episodes")
 
 
+def choose_source_by_section(sources):
+    sections = {}
+    for source in sources:
+        sections.setdefault(source["section"], []).append(source)
+    section_names = list(sections)
+    section_index = int(firebase("GET", "botState/seriesSectionIndex") or 0)
+    section = section_names[section_index % len(section_names)]
+    channel_indexes = firebase("GET", "botState/seriesSectionChannelIndexes") or {}
+    channel_index = int(channel_indexes.get(section) or 0)
+    source = sections[section][channel_index % len(sections[section])]
+    channel_indexes[section] = (channel_index + 1) % len(sections[section])
+    firebase("PUT", "botState/seriesSectionIndex", (section_index + 1) % len(section_names))
+    firebase("PUT", "botState/seriesSectionChannelIndexes", channel_indexes)
+    return source
+
+
 def run_once():
     if not YOUTUBE_API_KEY:
         raise RuntimeError("YOUTUBE_API_KEY is missing")
     sources = load_sources()
     categories = [{"id": key, "name": (value or {}).get("name", "")} for key, value in (firebase("GET", "categories") or {}).items()]
-    state = int(firebase("GET", "botState/seriesSourceIndex") or 0)
     if not sources:
         log("No series sources found")
         return
-    source = sources[state % len(sources)]
-    firebase("PUT", "botState/seriesSourceIndex", (state + 1) % len(sources))
+    source = choose_source_by_section(sources)
     category_id = get_category_id(source["section"], categories)
     if not category_id:
         log(f"Category not found: {source['section']}")
