@@ -2,6 +2,8 @@ import html
 import os
 import re
 
+from requests import HTTPError
+
 from bot import (
     KIDS_LIVE_SOURCE_URLS,
     extract_youtube_video_id,
@@ -254,17 +256,24 @@ def search_external_live_videos(sources, existing_live_videos):
     for channel_id in sources:
         if channel_id in existing_live_videos:
             continue
-        response = youtube(
-            "search",
-            {
-                "part": "snippet",
-                "channelId": channel_id,
-                "eventType": "live",
-                "type": "video",
-                "order": "date",
-                "maxResults": 5,
-            },
-        )
+        try:
+            response = youtube(
+                "search",
+                {
+                    "part": "snippet",
+                    "channelId": channel_id,
+                    "eventType": "live",
+                    "type": "video",
+                    "order": "date",
+                    "maxResults": 5,
+                },
+            )
+        except HTTPError as error:
+            status_code = error.response.status_code if error.response is not None else 0
+            print(f"External live search skipped ({status_code}): {channel_id}", flush=True)
+            if status_code == 429:
+                break
+            continue
         for item in response.get("items", []):
             video_id = (item.get("id") or {}).get("videoId")
             snippet = item.get("snippet") or {}
