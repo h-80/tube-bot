@@ -1,0 +1,28 @@
+name: Daily Video Cleanup
+
+on:
+  schedule:
+    # 00:00 Iraq time (21:00 UTC)
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Clean unavailable videos
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          FIREBASE_URL: https://alfaham-tube-web-default-rtdb.firebaseio.com
+        run: python bot.py --cleanup
