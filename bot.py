@@ -247,6 +247,13 @@ def live_search_phrase(category):
     return "بث مباشر"
 
 
+def youtube(path, params):
+    params = {**params, "key": YOUTUBE_API_KEY}
+    response = requests.get(f"https://www.googleapis.com/youtube/v3/{path}", params=params, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
+
+
 def is_kids_live_category(category):
     text = normalize(category.get("search_name") or category.get("name"))
     return ("طفل" in text or "اطفال" in text or "أطفال" in text or "كرتون" in text) and ("بث" in text or "مباشر" in text)
