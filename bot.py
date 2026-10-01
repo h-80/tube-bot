@@ -294,10 +294,11 @@ def search_kids_live_video(category, used_ids):
         if not channel_name:
             continue
 
-        for params in (
+        channel_id = resolve_channel_id_from_url(channel_url)
+        search_params = [
             {
                 "part": "snippet",
-                "channelId": resolve_channel_id_from_url(channel_url),
+                "channelId": channel_id,
                 "eventType": "live",
                 "type": "video",
                 "order": "date",
@@ -311,15 +312,41 @@ def search_kids_live_video(category, used_ids):
                 "order": "date",
                 "maxResults": 10,
             },
-        ):
-            if not params.get("channelId") and params.get("q") is None:
+            {
+                "part": "snippet",
+                "q": f"{channel_name}",
+                "type": "video",
+                "order": "date",
+                "maxResults": 10,
+            },
+        ]
+
+        for params in search_params:
+            if not params.get("channelId") and not params.get("q"):
                 continue
             response = youtube("search", params)
-            for item in response.get("items", []):
+            item_list = response.get("items", [])
+            if not item_list:
+                continue
+
+            video_ids = [
+                (item.get("id") or {}).get("videoId")
+                for item in item_list
+                if (item.get("id") or {}).get("videoId")
+            ]
+            if not video_ids:
+                continue
+
+            detail_map = get_video_details(video_ids)
+            for item in item_list:
                 video_id = (item.get("id") or {}).get("videoId")
                 if not video_id or video_id in used_ids:
                     continue
+                detail = detail_map.get(video_id) or {}
+                live_state = ((detail.get("snippet") or {}).get("liveBroadcastContent") or "")
                 title = str((item.get("snippet") or {}).get("title", "")).strip()
+                if live_state not in ("live", "upcoming") and params.get("eventType") == "live":
+                    continue
                 if any(word in normalize(title) for word in ("مقابلة", "لقاء", "رياضة", "موسيقى", "اغنية", "تريلر", "إعلان", "اعلان")):
                     continue
                 return {
