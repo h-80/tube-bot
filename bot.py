@@ -287,34 +287,48 @@ def resolve_channel_id_from_url(url):
 
 def search_kids_live_video(category, used_ids):
     for channel_url in load_kids_live_channels():
-        channel_id = resolve_channel_id_from_url(channel_url)
-        if not channel_id:
+        parsed = urlparse(channel_url)
+        channel_name = parsed.path.strip("/")
+        if channel_name.startswith("@"):
+            channel_name = channel_name[1:]
+        if not channel_name:
             continue
-        response = youtube(
-            "search",
+
+        for params in (
             {
                 "part": "snippet",
-                "channelId": channel_id,
+                "channelId": resolve_channel_id_from_url(channel_url),
                 "eventType": "live",
                 "type": "video",
                 "order": "date",
                 "maxResults": 10,
             },
-        )
-        for item in response.get("items", []):
-            video_id = (item.get("id") or {}).get("videoId")
-            if not video_id or video_id in used_ids:
+            {
+                "part": "snippet",
+                "q": f"{channel_name} live",
+                "eventType": "live",
+                "type": "video",
+                "order": "date",
+                "maxResults": 10,
+            },
+        ):
+            if not params.get("channelId") and params.get("q") is None:
                 continue
-            title = str((item.get("snippet") or {}).get("title", "")).strip()
-            if any(word in normalize(title) for word in ("مقابلة", "لقاء", "رياضة", "موسيقى", "اغنية", "تريلر", "إعلان", "اعلان")):
-                continue
-            return {
-                "id": video_id,
-                "title": title or "بث مباشر أطفال",
-                "description": str((item.get("snippet") or {}).get("description", "")).strip(),
-                "thumbnail": ((item.get("snippet") or {}).get("thumbnails") or {}).get("high", {}).get("url", ""),
-                "duration": 0,
-            }
+            response = youtube("search", params)
+            for item in response.get("items", []):
+                video_id = (item.get("id") or {}).get("videoId")
+                if not video_id or video_id in used_ids:
+                    continue
+                title = str((item.get("snippet") or {}).get("title", "")).strip()
+                if any(word in normalize(title) for word in ("مقابلة", "لقاء", "رياضة", "موسيقى", "اغنية", "تريلر", "إعلان", "اعلان")):
+                    continue
+                return {
+                    "id": video_id,
+                    "title": title or "بث مباشر أطفال",
+                    "description": str((item.get("snippet") or {}).get("description", "")).strip(),
+                    "thumbnail": ((item.get("snippet") or {}).get("thumbnails") or {}).get("high", {}).get("url", ""),
+                    "duration": 0,
+                }
     return None
 
 
