@@ -18,7 +18,38 @@ FIREBASE_URL = os.getenv(
 MAX_DAILY_POSTS = 10
 REQUEST_TIMEOUT = 30
 MIN_FILM_SECONDS = 40 * 60
-KIDS_LIVE_CHANNELS_FILE = os.getenv("KIDS_LIVE_CHANNELS_FILE", "قنوات أطفال بث مباشر.txt")
+KIDS_LIVE_CHANNEL_STATE_PATH = "botState/kidsLiveSourceChannels"
+KIDS_LIVE_SOURCE_URLS = (
+    "https://www.youtube.com/watch?v=oPonPGALYaU",
+    "https://www.youtube.com/watch?v=mF3s5-6mIH4",
+    "https://www.youtube.com/watch?v=nugWjdbb_GM",
+    "https://www.youtube.com/watch?v=WMBR_vDkd94",
+    "https://www.youtube.com/watch?v=90kaC8Kbw0k",
+    "https://www.youtube.com/watch?v=rEKifG2XUZg",
+    "https://www.youtube.com/watch?v=cwlERd7fCl8",
+    "https://www.youtube.com/watch?v=S_6wjcgw1mk",
+    "https://www.youtube.com/watch?v=gyqOOJCL4gA",
+    "https://www.youtube.com/watch?v=-Ye42cCA4Pg",
+    "https://www.youtube.com/watch?v=ckjqMRpkdWY",
+    "https://www.youtube.com/watch?v=w-7ZRByK1zA",
+    "https://www.youtube.com/watch?v=Vf9V4uereTw",
+    "https://www.youtube.com/watch?v=DCOwDr3NaeA",
+    "https://www.youtube.com/watch?v=8D6qmCFOVXk",
+    "https://www.youtube.com/watch?v=JYGpGKjOxvw",
+    "https://www.youtube.com/watch?v=gPV7kG0X1ao",
+    "https://www.youtube.com/watch?v=xHToZUYqP30",
+    "https://www.youtube.com/watch?v=v5UO0XAocEI",
+    "https://www.youtube.com/watch?v=neGRgiLLgsc",
+    "https://www.youtube.com/watch?v=G9WgurWVYQg",
+    "https://www.youtube.com/watch?v=CSNjwlJ7e8k",
+    "https://www.youtube.com/watch?v=iFyI-wdLvRE",
+    "https://www.youtube.com/watch?v=LMkmeEpvpss",
+    "https://www.youtube.com/watch?v=s0xPHuFof4w",
+    "https://www.youtube.com/watch?v=K9IgWfBi9kY",
+    "https://www.youtube.com/watch?v=5TcsWLngvyc",
+    "https://www.youtube.com/watch?v=UavAcv2CBfc",
+    "https://www.youtube.com/watch?v=8JIfZedF0KY",
+)
 REJECTED_TITLE_WORDS = (
     "مقطع", "مشهد", "تريلر", "إعلان", "اعلان", "برومو", "تشويقي",
     "trailer", "clip", "promo", "teaser", "episode", "حلقة", "الحلقة", "مسلسل",
@@ -173,10 +204,6 @@ def record_daily_publish():
 
 
 def choose_category(categories):
-    kids_category = next((category for category in categories if is_kids_live_category(category)), None)
-    if kids_category:
-        return kids_category
-
     state_path = "botState/youtubeNextCategoryIndex"
     current_index = int(firebase_get(state_path) or 0)
     category = categories[current_index % len(categories)]
@@ -263,99 +290,79 @@ def is_kids_live_category(category):
     return ("طفل" in text or "اطفال" in text or "أطفال" in text or "كرتون" in text) and ("بث" in text or "مباشر" in text)
 
 
+def extract_youtube_video_id(url):
+    match = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([A-Za-z0-9_-]{6,})", str(url))
+    return match.group(1) if match else ""
+
+
 def load_kids_live_channels():
-    try:
-        with open(KIDS_LIVE_CHANNELS_FILE, encoding="utf-8") as file:
-            return [line.strip() for line in file if line.strip() and line.strip().startswith("http")]
-    except OSError:
-        return []
+    saved_channels = firebase_get(KIDS_LIVE_CHANNEL_STATE_PATH) or {}
+    channels = {
+        str(channel_id): True
+        for channel_id in saved_channels
+        if channel_id
+    }
+    source_ids = [extract_youtube_video_id(url) for url in KIDS_LIVE_SOURCE_URLS]
+    source_ids = list(dict.fromkeys(video_id for video_id in source_ids if video_id))
+    details = get_video_details(source_ids)
+    for video_id in source_ids:
+        channel_id = ((details.get(video_id) or {}).get("snippet") or {}).get("channelId")
+        if channel_id:
+            channels[channel_id] = True
+    if channels != saved_channels:
+        firebase_put(KIDS_LIVE_CHANNEL_STATE_PATH, channels)
+    return list(channels)
 
 
-def resolve_channel_id_from_url(url):
-    parsed = urlparse(url)
-    if parsed.netloc.endswith("youtube.com") or parsed.netloc.endswith("www.youtube.com"):
-        path = parsed.path.strip("/")
-        if path.startswith("@"):
-            handle = path[1:]
-            result = youtube("channels", {"part": "id", "forHandle": f"@{handle}"}).get("items", [])
-            return (result[0] or {}).get("id") if result else None
-        if path:
-            result = youtube("channels", {"part": "id", "forUsername": path}).get("items", [])
-            return (result[0] or {}).get("id") if result else None
-    return None
+def get_uploads_playlists(channel_ids):
+    if not channel_ids:
+        return {}
+    response = youtube(
+        "channels",
+        {"part": "contentDetails", "id": ",".join(channel_ids), "maxResults": 50},
+    )
+    return {
+        item["id"]: (((item.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads"))
+        for item in response.get("items", [])
+        if ((item.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
+    }
 
 
 def search_kids_live_video(category, used_ids):
-    for channel_url in load_kids_live_channels():
-        parsed = urlparse(channel_url)
-        channel_name = parsed.path.strip("/")
-        if channel_name.startswith("@"):
-            channel_name = channel_name[1:]
-        if not channel_name:
+    channel_ids = load_kids_live_channels()
+    uploads = get_uploads_playlists(channel_ids)
+    items = []
+    for playlist_id in uploads.values():
+        response = youtube(
+            "playlistItems",
+            {"part": "snippet,contentDetails", "playlistId": playlist_id, "maxResults": 10},
+        )
+        items.extend(response.get("items", []))
+
+    video_ids = [
+        (item.get("contentDetails") or {}).get("videoId")
+        for item in items
+        if (item.get("contentDetails") or {}).get("videoId")
+    ]
+    details = get_video_details(list(dict.fromkeys(video_ids)))
+    for item in items:
+        video_id = (item.get("contentDetails") or {}).get("videoId")
+        if not video_id or video_id in used_ids:
             continue
-
-        channel_id = resolve_channel_id_from_url(channel_url)
-        search_params = [
-            {
-                "part": "snippet",
-                "channelId": channel_id,
-                "eventType": "live",
-                "type": "video",
-                "order": "date",
-                "maxResults": 10,
-            },
-            {
-                "part": "snippet",
-                "q": f"{channel_name} live",
-                "eventType": "live",
-                "type": "video",
-                "order": "date",
-                "maxResults": 10,
-            },
-            {
-                "part": "snippet",
-                "q": f"{channel_name}",
-                "type": "video",
-                "order": "date",
-                "maxResults": 10,
-            },
-        ]
-
-        for params in search_params:
-            if not params.get("channelId") and not params.get("q"):
-                continue
-            response = youtube("search", params)
-            item_list = response.get("items", [])
-            if not item_list:
-                continue
-
-            video_ids = [
-                (item.get("id") or {}).get("videoId")
-                for item in item_list
-                if (item.get("id") or {}).get("videoId")
-            ]
-            if not video_ids:
-                continue
-
-            detail_map = get_video_details(video_ids)
-            for item in item_list:
-                video_id = (item.get("id") or {}).get("videoId")
-                if not video_id or video_id in used_ids:
-                    continue
-                detail = detail_map.get(video_id) or {}
-                live_state = ((detail.get("snippet") or {}).get("liveBroadcastContent") or "")
-                title = str((item.get("snippet") or {}).get("title", "")).strip()
-                if live_state not in ("live", "upcoming") and params.get("eventType") == "live":
-                    continue
-                if any(word in normalize(title) for word in ("مقابلة", "لقاء", "رياضة", "موسيقى", "اغنية", "تريلر", "إعلان", "اعلان")):
-                    continue
-                return {
-                    "id": video_id,
-                    "title": title or "بث مباشر أطفال",
-                    "description": str((item.get("snippet") or {}).get("description", "")).strip(),
-                    "thumbnail": ((item.get("snippet") or {}).get("thumbnails") or {}).get("high", {}).get("url", ""),
-                    "duration": 0,
-                }
+        detail = details.get(video_id) or {}
+        snippet = detail.get("snippet") or item.get("snippet") or {}
+        if snippet.get("liveBroadcastContent") != "live":
+            continue
+        title = str(snippet.get("title", "")).strip()
+        if any(word in normalize(title) for word in ("مقابلة", "لقاء", "رياضة", "موسيقى", "اغنية", "تريلر", "إعلان", "اعلان")):
+            continue
+        return {
+            "id": video_id,
+            "title": title or "بث مباشر أطفال",
+            "description": str(snippet.get("description", "")).strip(),
+            "thumbnail": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url", ""),
+            "duration": 0,
+        }
     return None
 
 
