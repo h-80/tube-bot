@@ -1,8 +1,6 @@
 name: Automated YouTube & Gemini Bot
 
 on:
-  schedule:
-    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -19,11 +17,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests google-api-python-client google-generativeai
+          pip install requests
 
       - name: Run Bot Script
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.5-flash-lite
+          FIREBASE_URL: https://alfaham-tube-web-default-rtdb.firebaseio.com
         run: |
           python bot.py
