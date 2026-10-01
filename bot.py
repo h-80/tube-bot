@@ -1,84 +1,214 @@
+import html
 import os
+import re
+from datetime import datetime, timezone
+
 import requests
-import google.generativeai as genai
-from datetime import datetime
 
-# جلب المفاتيح والإعدادات من بيئة العمل
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-FIREBASE_URL = "https://alfaham-tube-web-default-rtdb.firebaseio.com"
 
-print("Starting Alfaham Tube Bot (Sequential Mode)...")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
+FIREBASE_URL = os.getenv(
+    "FIREBASE_URL",
+    "https://alfaham-tube-web-default-rtdb.firebaseio.com",
+).rstrip("/")
+MAX_DAILY_POSTS = 10
+REQUEST_TIMEOUT = 30
 
-if not YOUTUBE_API_KEY or not GEMINI_API_KEY:
-    print("Error: API keys are missing.")
-    exit(1)
 
-# إعداد جيميناي
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
+def log(message):
+    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}] {message}", flush=True)
 
-# 1. جلب الأقسام من Firebase لمعرفة الهيكلية وترتيبها
-categories_response = requests.get(f"{FIREBASE_URL}/categories.json")
-categories = {}
-if categories_response.status_code == 200 and categories_response.json():
-    categories = categories_response.json()
-    print(f"Fetched categories count: {len(categories)}")
-else:
-    print("Error: No categories found in Firebase.")
-    exit(1)
 
-if not categories:
-    print("Error: No categories available!")
-    exit(1)
+def firebase_get(path):
+    response = requests.get(f"{FIREBASE_URL}/{path}.json", timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
 
-# 2. جلب أحدث الفيديوهات من يوتيوب
-youtube_url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=1&order=date&type=video&key={YOUTUBE_API_KEY}"
-response = requests.get(youtube_url)
 
-if response.status_code == 200:
-    data = response.json()
-    items = data.get('items', [])
-    if items:
-        video = items[0]
-        title = video['snippet']['title']
-        video_id = video['id']['videoId']
-        thumbnail_url = video['snippet']['thumbnails']['high']['url']
-        print(f"Latest video found: {title}")
-        
-        # 3. اختيار القسم "بالتوالي" بناءً على الساعة الحالية (لكي ينتقل تلقائياً كل ساعتين بين الأقسام)
-        cat_items = list(categories.items())
-        current_hour = datetime.utcnow().hour
-        index_to_pick = (current_hour // 2) % len(cat_items)
-        
-        selected_category_id, selected_category_data = cat_items[index_to_pick]
-        selected_category_name = selected_category_data.get('name', '')
-        print(f"Sequential Selection -> Category Name: {selected_category_name} (ID: {selected_category_id})")
+def firebase_put(path, value):
+    response = requests.put(f"{FIREBASE_URL}/{path}.json", json=value, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
 
-        # توليد وصف احترافي بالعربية باستخدام جيميناي
-        desc_prompt = f"Write an engaging Arabic description and short article summary for this video title: {title}"
-        desc_response = model.generate_content(desc_prompt)
-        enhanced_description = desc_response.text
 
-        # 4. تجهيز بيانات الفيديو والنشر
-        article_data = {
-            "title": title,
-            "categoryId": selected_category_id,
-            "imageUrl": thumbnail_url,
-            "url": f"https://www.youtube.com/watch?v={video_id}",
-            "videoUrl": f"https://www.youtube.com/watch?v={video_id}",
-            "videoUrls": [f"https://www.youtube.com/watch?v={video_id}"],
-            "content": f"<p>{enhanced_description}</p>",
-            "createdAt": {".sv": "timestamp"}
+def firebase_post(path, value):
+    response = requests.post(f"{FIREBASE_URL}/{path}.json", json=value, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
+
+
+def normalize(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def is_excluded_category(name):
+    return "مسلسل" in normalize(name)
+
+
+def load_categories():
+    raw_categories = firebase_get("categories") or {}
+    categories = []
+    for category_id, data in raw_categories.items():
+        name = str((data or {}).get("name") or (data or {}).get("title") or "").strip()
+        if name and not is_excluded_category(name):
+            categories.append({"id": category_id, "name": name})
+    return categories
+
+
+def load_articles():
+    return firebase_get("articles") or {}
+
+
+def extract_video_id(article):
+    if article.get("videoId"):
+        return str(article["videoId"])
+    urls = [article.get("videoUrl", ""), article.get("url", "")]
+    urls.extend(article.get("videoUrls", []) or [])
+    for url in urls:
+        match = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([A-Za-z0-9_-]{6,})", str(url))
+        if match:
+            return match.group(1)
+    return ""
+
+
+def used_video_ids(articles):
+    return {extract_video_id(article or {}) for article in articles.values() if extract_video_id(article or {})}
+
+
+def today_key():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def daily_limit_reached():
+    state = firebase_get("botState/youtubeDaily") or {}
+    return state.get("date") == today_key() and int(state.get("count") or 0) >= MAX_DAILY_POSTS
+
+
+def record_daily_publish():
+    path = "botState/youtubeDaily"
+    current = firebase_get(path) or {}
+    count = int(current.get("count") or 0) if current.get("date") == today_key() else 0
+    firebase_put(path, {"date": today_key(), "count": count + 1})
+
+
+def choose_category(categories):
+    state_path = "botState/youtubeNextCategoryIndex"
+    current_index = int(firebase_get(state_path) or 0)
+    category = categories[current_index % len(categories)]
+    firebase_put(state_path, (current_index + 1) % len(categories))
+    return category
+
+
+def is_live_category(name):
+    return "بث مباشر" in normalize(name) or "مباشر" in normalize(name)
+
+
+def search_video(category_name, used_ids):
+    params = {
+        "part": "snippet",
+        "maxResults": 10,
+        "order": "date",
+        "type": "video",
+        "q": category_name,
+        "key": YOUTUBE_API_KEY,
+    }
+    if is_live_category(category_name):
+        params["eventType"] = "live"
+
+    response = requests.get(
+        "https://www.googleapis.com/youtube/v3/search",
+        params=params,
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    for item in response.json().get("items", []):
+        video_id = (item.get("id") or {}).get("videoId")
+        if not video_id or video_id in used_ids:
+            continue
+        snippet = item.get("snippet") or {}
+        return {
+            "id": video_id,
+            "title": snippet.get("title", "فيديو جديد").strip(),
+            "description": snippet.get("description", "").strip(),
+            "thumbnail": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url", ""),
         }
-        
-        # 5. رفع البيانات إلى Firebase
-        fb_response = requests.post(f"{FIREBASE_URL}/articles.json", json=article_data)
-        if fb_response.status_code == 200:
-            print("Video successfully published to Firebase with sequential category!")
-        else:
-            print(f"Failed to push to Firebase: {fb_response.text}")
-    else:
-        print("No new videos found on YouTube.")
-else:
-    print(f"YouTube API Error: {response.text}")
+    return None
+
+
+def generate_description(title, category_name):
+    fallback = f"شاهد هذا الفيديو من قسم {category_name}. نرجو متابعة المصدر الأصلي لمعرفة التفاصيل الكاملة."
+    if not GEMINI_API_KEY:
+        return fallback
+
+    prompt = (
+        "اكتب وصفًا عربيًا قصيرًا وأصليًا من 60 إلى 100 كلمة لفيديو يوتيوب. "
+        "لا تنسخ أي نص، ولا تدّعي معلومات غير موجودة. أعد النص فقط دون عنوان.\n"
+        f"عنوان الفيديو: {title}\nالقسم: {category_name}"
+    )
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            params={"key": GEMINI_API_KEY},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.6, "maxOutputTokens": 300},
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as error:
+        log(f"Gemini skipped; using fallback description: {error}")
+        return fallback
+
+
+def publish_video(category, video):
+    video_url = f"https://www.youtube.com/watch?v={video['id']}"
+    description = generate_description(video["title"], category["name"])
+    content = f"<p>{html.escape(description)}</p>"
+    if is_live_category(category["name"]):
+        content = f"<p><strong>بث مباشر الآن</strong></p>{content}"
+
+    article = {
+        "title": video["title"],
+        "categoryId": category["id"],
+        "imageUrl": video["thumbnail"],
+        "url": video_url,
+        "videoId": video["id"],
+        "videoUrl": video_url,
+        "videoUrls": [video_url],
+        "content": content,
+        "createdAt": {".sv": "timestamp"},
+        "source": "YouTube",
+        "isLive": is_live_category(category["name"]),
+    }
+    firebase_post("articles", article)
+    record_daily_publish()
+    log(f"Published: {video['title']} | category: {category['name']}")
+
+
+def run_once():
+    if not YOUTUBE_API_KEY:
+        raise RuntimeError("YOUTUBE_API_KEY is missing")
+    if daily_limit_reached():
+        log(f"Daily limit reached: {MAX_DAILY_POSTS} videos")
+        return
+
+    categories = load_categories()
+    if not categories:
+        raise RuntimeError("No eligible categories found")
+
+    category = choose_category(categories)
+    used_ids = used_video_ids(load_articles())
+    log(f"Searching one video for: {category['name']}")
+    video = search_video(category["name"], used_ids)
+    if not video:
+        log("No new video found for this category; nothing was published")
+        return
+    publish_video(category, video)
+
+
+if __name__ == "__main__":
+    run_once()
