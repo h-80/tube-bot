@@ -10,7 +10,11 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 FIREBASE_URL = os.getenv("FIREBASE_URL", "https://alfaham-tube-web-default-rtdb.firebaseio.com").rstrip("/")
 SOURCES_FILE = os.getenv("SERIES_SOURCES_FILE", "مسلسلات.txt")
 REQUEST_TIMEOUT = 30
-SERIES_WORDS = ("مسلسل", "المسلسل", "مسلسلات", "حلقة", "الحلقة", "حلقات", "episode", "episodes", "ep", "season", "الموسم")
+SERIES_WORDS = (
+    "مسلسل", "المسلسل", "مسلسلات", "حلقة", "الحلقة", "حلقات", "جميع الحلقات",
+    "كل الحلقات", "الحلقات كاملة", "حلقات كاملة", "جميع حلقات", "episode", "episodes", "full episodes",
+    "complete episodes", "ep", "season", "الموسم",
+)
 REJECTED_WORDS = ("برنامج", "برامج", "لقاء", "مقابلة", "إعلان", "اعلان", "تريلر", "ملخص", "مقطع", "أغنية", "اغنية", "promo", "trailer", "recap", "summary")
 
 
