@@ -87,7 +87,7 @@ def load_source_channels(categories, articles):
             "title": str(data.get("title") or ""),
         }
         for channel_id, data in saved.items()
-        if channel_id and isinstance(data, dict) and data.get("categoryId") in categories
+        if channel_id and isinstance(data, dict) and data.get("categoryId")
     }
 
     article_ids = []
