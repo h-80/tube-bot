@@ -2,8 +2,8 @@ name: Alfaham Tube Auto Bot
 
 on:
   schedule:
-    # هذا السطر يجعل البوت يعمل تلقائياً كل ساعة تماماً بدون أي تدخل منك
-    - cron: '0 * * * *'
+    # دورة واحدة كل ساعتين لتقليل استهلاك YouTube API والحصة اليومية
+    - cron: '0 */2 * * *'
   workflow_dispatch: # يتيح لك تشغيله يدوياً للاختبار متى شئت
 
 jobs:
@@ -20,11 +20,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests google-generativeai
+          pip install requests
 
       - name: Run Bot Script
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.5-flash-lite
+          FIREBASE_URL: https://alfaham-tube-web-default-rtdb.firebaseio.com
         run: |
           python bot.py
