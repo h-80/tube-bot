@@ -84,7 +84,7 @@ def load_categories():
     if not categories:
         for category_id, data in raw_categories.items():
             name = str((data or {}).get("name") or (data or {}).get("title") or "").strip()
-            if name and not is_excluded_category(name):
+            if name and not ("مسلسل" in normalize(name)):
                 path = category_path(category_id)
                 categories.append({"id": category_id, "name": name, "search_name": " ".join(reversed(path)), "is_live": False})
     return categories
@@ -215,7 +215,7 @@ def cleanup_unavailable_videos():
 
 
 def search_video(category, used_ids):
-    category_name = category["name"]
+    category_name = category.get("search_name") or category["name"]
     live = is_live_category(category)
     params = {
         "part": "snippet",
