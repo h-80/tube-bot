@@ -303,7 +303,7 @@ def publish_video(category, video):
         "title": video["title"],
         "categoryId": category["id"],
         "imageUrl": video["thumbnail"],
-        "url": video_url,
+        "url": "",
         "videoId": video["id"],
         "videoUrl": video_url,
         "videoUrls": [video_url],
