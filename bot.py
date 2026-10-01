@@ -173,6 +173,10 @@ def record_daily_publish():
 
 
 def choose_category(categories):
+    kids_category = next((category for category in categories if is_kids_live_category(category)), None)
+    if kids_category:
+        return kids_category
+
     state_path = "botState/youtubeNextCategoryIndex"
     current_index = int(firebase_get(state_path) or 0)
     category = categories[current_index % len(categories)]
