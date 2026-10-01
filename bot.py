@@ -15,6 +15,11 @@ FIREBASE_URL = os.getenv(
 ).rstrip("/")
 MAX_DAILY_POSTS = 10
 REQUEST_TIMEOUT = 30
+MIN_FILM_SECONDS = 60 * 60
+REJECTED_TITLE_WORDS = (
+    "مقطع", "مشهد", "تريلر", "إعلان", "اعلان", "برومو", "تشويقي",
+    "trailer", "clip", "promo", "teaser", "episode", "حلقة", "مسلسل",
+)
 
 
 def log(message):
@@ -39,21 +44,49 @@ def firebase_post(path, value):
     return response.json()
 
 
+def firebase_delete(path):
+    response = requests.delete(f"{FIREBASE_URL}/{path}.json", timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+
+
 def normalize(value):
     return re.sub(r"\s+", " ", str(value or "")).strip().lower()
 
 
-def is_excluded_category(name):
-    return "مسلسل" in normalize(name)
-
-
 def load_categories():
     raw_categories = firebase_get("categories") or {}
+    def category_path(category_id):
+        names = []
+        current_id = category_id
+        visited = set()
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            data = raw_categories.get(current_id) or {}
+            names.append(str(data.get("name") or data.get("title") or "").strip())
+            current_id = data.get("parentId")
+        return names
+
+    child_ids = {
+        data.get("parentId")
+        for data in raw_categories.values()
+        if isinstance(data, dict) and data.get("parentId")
+    }
     categories = []
     for category_id, data in raw_categories.items():
         name = str((data or {}).get("name") or (data or {}).get("title") or "").strip()
-        if name and not is_excluded_category(name):
-            categories.append({"id": category_id, "name": name})
+        path = category_path(category_id)
+        path_text = " ".join(path)
+        live = "بث" in normalize(path_text) or "مباشر" in normalize(path_text)
+        excluded_series = "مسلسل" in normalize(name) and not live
+        if name and not excluded_series and category_id not in child_ids:
+            search_name = " ".join(reversed([part for part in path if part]))
+            categories.append({"id": category_id, "name": name, "search_name": search_name, "is_live": live})
+    if not categories:
+        for category_id, data in raw_categories.items():
+            name = str((data or {}).get("name") or (data or {}).get("title") or "").strip()
+            if name and not is_excluded_category(name):
+                path = category_path(category_id)
+                categories.append({"id": category_id, "name": name, "search_name": " ".join(reversed(path)), "is_live": False})
     return categories
 
 
@@ -101,21 +134,101 @@ def choose_category(categories):
     return category
 
 
-def is_live_category(name):
-    return "بث مباشر" in normalize(name) or "مباشر" in normalize(name)
+def is_live_category(category):
+    return bool(category.get("is_live")) or "بث" in normalize(category.get("name")) or "مباشر" in normalize(category.get("name"))
 
 
-def search_video(category_name, used_ids):
+def parse_duration(duration):
+    match = re.fullmatch(
+        r"PT(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?",
+        duration or "",
+    )
+    if not match:
+        return 0
+    return (
+        int(match.group("hours") or 0) * 3600
+        + int(match.group("minutes") or 0) * 60
+        + int(match.group("seconds") or 0)
+    )
+
+
+def rejected_title(title):
+    normalized_title = normalize(title)
+    return any(word in normalized_title for word in REJECTED_TITLE_WORDS)
+
+
+def get_video_details(video_ids):
+    if not video_ids:
+        return {}
+    response = requests.get(
+        "https://www.googleapis.com/youtube/v3/videos",
+        params={
+            "part": "snippet,contentDetails",
+            "id": ",".join(video_ids),
+            "key": YOUTUBE_API_KEY,
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return {item["id"]: item for item in response.json().get("items", [])}
+
+
+def cleanup_unavailable_videos():
+    state_path = "botState/lastVideoCleanup"
+    if firebase_get(state_path) == today_key():
+        return
+
+    articles = load_articles()
+    references = {}
+    for article_id, article in articles.items():
+        article = article or {}
+        video_id = extract_video_id(article)
+        if video_id and (article.get("source") == "YouTube" or article.get("videoId")):
+            references[video_id] = {
+                "article_id": article_id,
+                "is_live": article.get("isLive") is True,
+            }
+
+    video_ids = list(references)
+    removed = 0
+    for start in range(0, len(video_ids), 50):
+        batch = video_ids[start:start + 50]
+        response = requests.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "status,snippet", "id": ",".join(batch), "key": YOUTUBE_API_KEY},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        found = {item["id"]: item for item in response.json().get("items", [])}
+        for video_id in batch:
+            item = found.get(video_id)
+            status = (item or {}).get("status") or {}
+            snippet = (item or {}).get("snippet") or {}
+            unavailable = not item or status.get("privacyStatus") == "private" or status.get("embeddable") is False
+            ended_live = references[video_id]["is_live"] and snippet.get("liveBroadcastContent") == "none"
+            if unavailable or ended_live:
+                firebase_delete(f"articles/{references[video_id]['article_id']}")
+                removed += 1
+
+    firebase_put(state_path, today_key())
+    log(f"Daily cleanup complete: removed {removed} unavailable videos")
+
+
+def search_video(category, used_ids):
+    category_name = category["name"]
+    live = is_live_category(category)
     params = {
         "part": "snippet",
         "maxResults": 10,
         "order": "date",
         "type": "video",
-        "q": category_name,
+        "q": category_name if live else f"فيلم كامل {category_name}",
         "key": YOUTUBE_API_KEY,
     }
-    if is_live_category(category_name):
+    if live:
         params["eventType"] = "live"
+    else:
+        params["videoDuration"] = "long"
 
     response = requests.get(
         "https://www.googleapis.com/youtube/v3/search",
@@ -123,16 +236,31 @@ def search_video(category_name, used_ids):
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
-    for item in response.json().get("items", []):
+    items = response.json().get("items", [])
+    candidate_ids = [
+        (item.get("id") or {}).get("videoId")
+        for item in items
+        if (item.get("id") or {}).get("videoId")
+    ]
+    details = get_video_details(candidate_ids)
+
+    for item in items:
         video_id = (item.get("id") or {}).get("videoId")
         if not video_id or video_id in used_ids:
             continue
         snippet = item.get("snippet") or {}
+        title = snippet.get("title", "").strip()
+        detail = details.get(video_id) or {}
+        duration = parse_duration((detail.get("contentDetails") or {}).get("duration"))
+        if not live and (duration < MIN_FILM_SECONDS or rejected_title(title)):
+            log(f"Skipped non-film: {title} ({duration // 60} minutes)")
+            continue
         return {
             "id": video_id,
-            "title": snippet.get("title", "فيديو جديد").strip(),
+            "title": title or "فيديو جديد",
             "description": snippet.get("description", "").strip(),
             "thumbnail": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url", ""),
+            "duration": duration,
         }
     return None
 
@@ -168,7 +296,7 @@ def publish_video(category, video):
     video_url = f"https://www.youtube.com/watch?v={video['id']}"
     description = generate_description(video["title"], category["name"])
     content = f"<p>{html.escape(description)}</p>"
-    if is_live_category(category["name"]):
+    if is_live_category(category):
         content = f"<p><strong>بث مباشر الآن</strong></p>{content}"
 
     article = {
@@ -182,7 +310,7 @@ def publish_video(category, video):
         "content": content,
         "createdAt": {".sv": "timestamp"},
         "source": "YouTube",
-        "isLive": is_live_category(category["name"]),
+        "isLive": is_live_category(category),
     }
     firebase_post("articles", article)
     record_daily_publish()
@@ -192,6 +320,7 @@ def publish_video(category, video):
 def run_once():
     if not YOUTUBE_API_KEY:
         raise RuntimeError("YOUTUBE_API_KEY is missing")
+    cleanup_unavailable_videos()
     if daily_limit_reached():
         log(f"Daily limit reached: {MAX_DAILY_POSTS} videos")
         return
@@ -203,7 +332,7 @@ def run_once():
     category = choose_category(categories)
     used_ids = used_video_ids(load_articles())
     log(f"Searching one video for: {category['name']}")
-    video = search_video(category["name"], used_ids)
+    video = search_video(category, used_ids)
     if not video:
         log("No new video found for this category; nothing was published")
         return
