@@ -7,7 +7,6 @@ from bot import (
     firebase_delete,
     firebase_get,
     firebase_put,
-    get_video_details,
     publish_video,
     youtube,
 )
@@ -18,6 +17,19 @@ LIVE_CHANNELS_STATE_PATH = "botState/liveSourceChannels"
 
 def normalize(value):
     return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def get_video_details_batched(video_ids):
+    details = {}
+    unique_ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    for start in range(0, len(unique_ids), 50):
+        batch = unique_ids[start:start + 50]
+        response = youtube(
+            "videos",
+            {"part": "snippet,contentDetails", "id": ",".join(batch)},
+        )
+        details.update({item["id"]: item for item in response.get("items", [])})
+    return details
 
 
 def load_live_categories():
@@ -88,7 +100,7 @@ def load_source_channels(categories, articles):
             article_ids.append(video_id)
 
     source_ids = [extract_youtube_video_id(url) for url in KIDS_LIVE_SOURCE_URLS]
-    details = get_video_details(list(dict.fromkeys(article_ids + source_ids)))
+    details = get_video_details_batched(article_ids + source_ids)
 
     for video_id in article_ids:
         detail = details.get(video_id) or {}
@@ -152,7 +164,7 @@ def find_live_videos(sources):
             if (item.get("contentDetails") or {}).get("videoId")
         )
 
-    details = get_video_details(list(dict.fromkeys(all_video_ids)))
+    details = get_video_details_batched(all_video_ids)
     live_videos = {}
     for channel_id, items in playlist_items.items():
         for item in items:
@@ -209,7 +221,7 @@ def remove_ended_live_articles(articles, live_categories):
         for article in articles.values()
         if is_live_article(article or {}, live_categories) and article_video_id(article or {})
     ]
-    details = get_video_details(list(dict.fromkeys(current_ids)))
+    details = get_video_details_batched(current_ids)
     for article_id, article in articles.items():
         article = article or {}
         if not is_live_article(article, live_categories):
