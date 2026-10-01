@@ -171,6 +171,38 @@ def find_live_videos(sources):
     return live_videos
 
 
+def search_external_live_videos(sources, existing_live_videos):
+    live_videos = {}
+    for channel_id in sources:
+        if channel_id in existing_live_videos:
+            continue
+        response = youtube(
+            "search",
+            {
+                "part": "snippet",
+                "channelId": channel_id,
+                "eventType": "live",
+                "type": "video",
+                "order": "date",
+                "maxResults": 5,
+            },
+        )
+        for item in response.get("items", []):
+            video_id = (item.get("id") or {}).get("videoId")
+            snippet = item.get("snippet") or {}
+            if not video_id or snippet.get("liveBroadcastContent") != "live":
+                continue
+            live_videos[channel_id] = {
+                "id": video_id,
+                "title": str(snippet.get("title") or "بث مباشر").strip(),
+                "description": str(snippet.get("description") or "").strip(),
+                "thumbnail": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url", ""),
+                "duration": 0,
+            }
+            break
+    return live_videos
+
+
 def remove_ended_live_articles(articles, live_categories):
     current_ids = [
         article_video_id(article or {})
@@ -204,6 +236,8 @@ def run_once():
     articles = load_articles()
     used_ids = {article_video_id(article or {}) for article in articles.values() if article_video_id(article or {})}
     live_videos = find_live_videos(sources)
+    external_live_videos = search_external_live_videos(sources, live_videos)
+    live_videos.update(external_live_videos)
 
     for channel_id, video in live_videos.items():
         if video["id"] in used_ids:
