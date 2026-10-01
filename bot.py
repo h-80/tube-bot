@@ -15,11 +15,19 @@ FIREBASE_URL = os.getenv(
 ).rstrip("/")
 MAX_DAILY_POSTS = 10
 REQUEST_TIMEOUT = 30
-MIN_FILM_SECONDS = 60 * 60
+MIN_FILM_SECONDS = 40 * 60
 REJECTED_TITLE_WORDS = (
     "مقطع", "مشهد", "تريلر", "إعلان", "اعلان", "برومو", "تشويقي",
-    "trailer", "clip", "promo", "teaser", "episode", "حلقة", "مسلسل",
+    "trailer", "clip", "promo", "teaser", "episode", "حلقة", "الحلقة", "مسلسل",
+    "الموسم", "موسم", "season", "الجزء", "جزء", "part",
+    "ملخص", "ملخصات", "ملخص الفيلم", "شرح الفيلم", "قصة الفيلم",
+    "مراجعة", "تحليل الفيلم", "recap", "summary", "review", "explained",
 )
+ARABIC_LANGUAGE_WORDS = (
+    "عربي", "بالعربي", "مدبلج", "مدبلجة", "دبلجة", "مترجم", "مترجمة",
+    "ترجمة", "arabic", "dubbed", "dub", "subbed", "subtitles",
+)
+CHILDREN_WORDS = ("طفل", "أطفال", "اطفال", "كرتون", "cartoon", "kids", "children")
 
 
 def log(message):
@@ -157,6 +165,50 @@ def rejected_title(title):
     return any(word in normalized_title for word in REJECTED_TITLE_WORDS)
 
 
+def has_arabic_language_marker(title):
+    normalized_title = normalize(title)
+    return any(word in normalized_title for word in ARABIC_LANGUAGE_WORDS)
+
+
+def is_children_live_category(category):
+    if not is_live_category(category):
+        return False
+    path = normalize(category.get("search_name") or category.get("name"))
+    return any(word in path for word in CHILDREN_WORDS)
+
+
+def is_anime_or_cartoon_category(category):
+    path = normalize(category.get("search_name") or category.get("name"))
+    return any(word in path for word in ("انمي", "أنمي", "كرتون", "anime", "cartoon"))
+
+
+def has_full_movie_marker(title):
+    normalized_title = normalize(title)
+    return any(word in normalized_title for word in ("فيلم", "فيلم كامل", "movie", "full movie"))
+
+
+def looks_like_full_movie(title, description, category):
+    combined_text = f"{title} {description}"
+    if rejected_title(combined_text):
+        return False
+    if not has_full_movie_marker(combined_text):
+        return False
+    if is_anime_or_cartoon_category(category) and not has_full_movie_marker(title):
+        return False
+    return has_arabic_language_marker(combined_text)
+
+
+def live_search_phrase(category):
+    path = normalize(category.get("search_name") or category.get("name"))
+    if any(word in path for word in CHILDREN_WORDS):
+        return "كرتون بث مباشر"
+    if "خبر" in path or "اخبار" in path:
+        return "أخبار بث مباشر"
+    if "مسلسل" in path:
+        return "مسلسلات بث مباشر"
+    return "بث مباشر"
+
+
 def get_video_details(video_ids):
     if not video_ids:
         return {}
@@ -183,7 +235,7 @@ def cleanup_unavailable_videos():
     for article_id, article in articles.items():
         article = article or {}
         video_id = extract_video_id(article)
-        if video_id and (article.get("source") == "YouTube" or article.get("videoId")):
+        if video_id:
             references[video_id] = {
                 "article_id": article_id,
                 "is_live": article.get("isLive") is True,
@@ -222,13 +274,15 @@ def search_video(category, used_ids):
         "maxResults": 10,
         "order": "date",
         "type": "video",
-        "q": category_name if live else f"فيلم كامل {category_name}",
+        "q": (
+            f"{live_search_phrase(category)} {category_name}"
+            if live
+            else f"فيلم كامل عربي مدبلج مترجم {category_name}"
+        ),
         "key": YOUTUBE_API_KEY,
     }
     if live:
         params["eventType"] = "live"
-    else:
-        params["videoDuration"] = "long"
 
     response = requests.get(
         "https://www.googleapis.com/youtube/v3/search",
@@ -250,15 +304,19 @@ def search_video(category, used_ids):
             continue
         snippet = item.get("snippet") or {}
         title = snippet.get("title", "").strip()
+        description = str(snippet.get("description", "")).strip()
         detail = details.get(video_id) or {}
         duration = parse_duration((detail.get("contentDetails") or {}).get("duration"))
-        if not live and (duration < MIN_FILM_SECONDS or rejected_title(title)):
-            log(f"Skipped non-film: {title} ({duration // 60} minutes)")
+        if not live and (
+            duration < MIN_FILM_SECONDS
+            or not looks_like_full_movie(title, description, category)
+        ):
+            log(f"Skipped non-film or short film: {title} ({duration // 60} minutes)")
             continue
         return {
             "id": video_id,
             "title": title or "فيديو جديد",
-            "description": snippet.get("description", "").strip(),
+            "description": description,
             "thumbnail": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url", ""),
             "duration": duration,
         }
