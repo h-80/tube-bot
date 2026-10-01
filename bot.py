@@ -1,6 +1,7 @@
 import html
 import os
 import re
+import sys
 from datetime import datetime, timezone
 
 import requests
@@ -112,6 +113,36 @@ def extract_video_id(article):
         if match:
             return match.group(1)
     return ""
+
+
+def direct_video_urls(article):
+    urls = list(article.get("videoUrls", []) or [])
+    if article.get("videoUrl"):
+        urls.append(article["videoUrl"])
+    return [
+        str(url).strip()
+        for url in urls
+        if str(url).strip() and not extract_video_id({"videoUrl": url})
+        and re.search(r"\.(?:m3u8|mpd|flv|ts)(?:$|[?#])", str(url), re.IGNORECASE)
+    ]
+
+
+def direct_video_unavailable(url, is_live):
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": "AlfahamTubeBot/1.0", "Range": "bytes=0-65535"},
+            stream=True,
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            return True
+        if is_live and ".m3u8" in url.lower():
+            content = response.raw.read(65536).decode("utf-8", errors="ignore")
+            return "#EXT-X-ENDLIST" in content
+        return False
+    except requests.RequestException:
+        return True
 
 
 def used_video_ids(articles):
@@ -231,6 +262,11 @@ def cleanup_unavailable_videos():
         return
 
     articles = load_articles()
+    live_category_ids = {
+        category["id"]
+        for category in load_categories()
+        if category.get("is_live")
+    }
     references = {}
     for article_id, article in articles.items():
         article = article or {}
@@ -238,7 +274,7 @@ def cleanup_unavailable_videos():
         if video_id:
             references[video_id] = {
                 "article_id": article_id,
-                "is_live": article.get("isLive") is True,
+                "is_live": article.get("isLive") is True or article.get("categoryId") in live_category_ids,
             }
 
     video_ids = list(references)
@@ -261,6 +297,18 @@ def cleanup_unavailable_videos():
             if unavailable or ended_live:
                 firebase_delete(f"articles/{references[video_id]['article_id']}")
                 removed += 1
+
+    checked_direct = set()
+    for article_id, article in articles.items():
+        article = article or {}
+        urls = direct_video_urls(article)
+        if not urls or article_id in checked_direct:
+            continue
+        is_live = article.get("isLive") is True or article.get("categoryId") in live_category_ids
+        if all(direct_video_unavailable(url, is_live) for url in urls):
+            firebase_delete(f"articles/{article_id}")
+            checked_direct.add(article_id)
+            removed += 1
 
     firebase_put(state_path, today_key())
     log(f"Daily cleanup complete: removed {removed} unavailable videos")
@@ -397,5 +445,15 @@ def run_once():
     publish_video(category, video)
 
 
+def run_cleanup_only():
+    if not YOUTUBE_API_KEY:
+        raise RuntimeError("YOUTUBE_API_KEY is missing")
+    firebase_put("botState/lastVideoCleanup", "")
+    cleanup_unavailable_videos()
+
+
 if __name__ == "__main__":
-    run_once()
+    if len(sys.argv) > 1 and sys.argv[1] == "--cleanup":
+        run_cleanup_only()
+    else:
+        run_once()
