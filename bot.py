@@ -89,7 +89,12 @@ def load_categories():
         path_text = " ".join(path)
         live = "بث" in normalize(path_text) or "مباشر" in normalize(path_text)
         excluded_series = "مسلسل" in normalize(name) and not live
-        if name and not excluded_series and category_id not in child_ids:
+        name_text = normalize(name)
+        is_kids_live_child = (
+            ("طفل" in name_text or "اطفال" in name_text or "أطفال" in name_text or "كرتون" in name_text)
+            and ("بث" in name_text or "مباشر" in name_text)
+        )
+        if name and not excluded_series and (category_id not in child_ids or is_kids_live_child):
             search_name = " ".join(reversed([part for part in path if part]))
             categories.append({"id": category_id, "name": name, "search_name": search_name, "is_live": live})
     if not categories:
