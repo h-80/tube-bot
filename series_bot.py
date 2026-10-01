@@ -59,9 +59,17 @@ def handle_from_url(url):
     return match.group(1) if match else ""
 
 
-def series_video_title(title):
+def series_video_title(title, playlist_title=""):
     value = normalize(title)
-    return any(word in value for word in SERIES_WORDS) and not any(word in value for word in REJECTED_WORDS)
+    if any(word in value for word in REJECTED_WORDS):
+        return False
+    if any(word in value for word in SERIES_WORDS):
+        return True
+    playlist_value = normalize(playlist_title)
+    return bool(
+        any(word in playlist_value for word in SERIES_WORDS)
+        and re.search(r"(?:^|\s)(?:الحلقة\s*)?\d{1,3}(?:\s|$)", value)
+    )
 
 
 def playlist_is_series(title):
@@ -90,14 +98,14 @@ def get_playlists(channel_handle):
     ]
 
 
-def get_playlist_episodes(playlist_id):
+def get_playlist_episodes(playlist_id, playlist_title):
     items = youtube("playlistItems", {"part": "snippet,contentDetails", "playlistId": playlist_id, "maxResults": 50}).get("items", [])
     episodes = []
     for item in items:
         snippet = item.get("snippet") or {}
         title = str(snippet.get("title", "")).strip()
         video_id = (item.get("contentDetails") or {}).get("videoId")
-        if not video_id or not series_video_title(title):
+        if not video_id or not series_video_title(title, playlist_title):
             continue
         episodes.append({
             "id": video_id,
@@ -111,7 +119,7 @@ def get_playlist_episodes(playlist_id):
 def publish_or_update_series(playlist, category_id, section):
     playlist_id = playlist["id"]
     playlist_title = (playlist.get("snippet") or {}).get("title", "مسلسل")
-    episodes = get_playlist_episodes(playlist_id)
+    episodes = get_playlist_episodes(playlist_id, playlist_title)
     if not episodes:
         return
     articles = firebase("GET", "articles") or {}
