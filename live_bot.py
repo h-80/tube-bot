@@ -216,21 +216,7 @@ def search_external_live_videos(sources, existing_live_videos):
 
 
 def remove_ended_live_articles(articles, live_categories):
-    current_ids = [
-        article_video_id(article or {})
-        for article in articles.values()
-        if is_live_article(article or {}, live_categories) and article_video_id(article or {})
-    ]
-    details = get_video_details_batched(current_ids)
-    for article_id, article in articles.items():
-        article = article or {}
-        if not is_live_article(article, live_categories):
-            continue
-        video_id = article_video_id(article)
-        detail = details.get(video_id) or {}
-        state = ((detail.get("snippet") or {}).get("liveBroadcastContent"))
-        if not detail or state != "live":
-            firebase_delete(f"articles/{article_id}")
+    return
 
 
 def run_once():
