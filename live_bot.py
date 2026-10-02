@@ -1,6 +1,7 @@
 import html
 import os
 import re
+from datetime import datetime, timezone
 
 from requests import HTTPError
 
@@ -17,6 +18,9 @@ from bot import (
 
 FIREBASE_URL = os.getenv("FIREBASE_URL", "https://alfaham-tube-web-default-rtdb.firebaseio.com").rstrip("/")
 LIVE_CHANNELS_STATE_PATH = "botState/liveSourceChannels"
+LIVE_EXTERNAL_SEARCH_STATE_PATH = "botState/liveExternalSearchState"
+LIVE_EXTERNAL_SEARCH_INTERVAL_SECONDS = 60 * 60
+YOUTUBE_RATE_LIMITED = False
 
 
 def normalize(value):
@@ -28,12 +32,28 @@ def get_video_details_batched(video_ids):
     unique_ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
     for start in range(0, len(unique_ids), 50):
         batch = unique_ids[start:start + 50]
-        response = youtube(
+        response = youtube_with_rate_limit_handling(
             "videos",
             {"part": "snippet,contentDetails", "id": ",".join(batch)},
         )
         details.update({item["id"]: item for item in response.get("items", [])})
     return details
+
+
+def youtube_with_rate_limit_handling(path, params):
+    global YOUTUBE_RATE_LIMITED
+    if YOUTUBE_RATE_LIMITED:
+        return {"items": []}
+
+    try:
+        return youtube(path, params)
+    except HTTPError as error:
+        status_code = error.response.status_code if error.response is not None else 0
+        if status_code == 429:
+            YOUTUBE_RATE_LIMITED = True
+            print(f"YouTube API rate limit reached for {path}; skipping this request", flush=True)
+            return {"items": []}
+        raise
 
 
 def load_live_categories():
@@ -144,7 +164,7 @@ def load_upload_playlists(channel_ids):
     playlists = {}
     for start in range(0, len(channel_ids), 50):
         batch = channel_ids[start:start + 50]
-        response = youtube(
+        response = youtube_with_rate_limit_handling(
             "channels",
             {"part": "contentDetails", "id": ",".join(batch), "maxResults": 50},
         )
@@ -161,7 +181,7 @@ def find_live_videos(sources):
     playlist_items = {}
     all_video_ids = []
     for channel_id, playlist_id in playlists.items():
-        response = youtube(
+        response = youtube_with_rate_limit_handling(
             "playlistItems",
             {"part": "snippet,contentDetails", "playlistId": playlist_id, "maxResults": 10},
         )
@@ -252,42 +272,65 @@ def sync_existing_live_articles(articles, categories, live_videos):
 
 
 def search_external_live_videos(sources, existing_live_videos):
-    live_videos = {}
-    for channel_id in sources:
-        if channel_id in existing_live_videos:
+    channel_ids = list(sources)
+    if not channel_ids:
+        return {}
+
+    state = firebase_get(LIVE_EXTERNAL_SEARCH_STATE_PATH) or {}
+    now = datetime.now(timezone.utc).timestamp()
+    last_search = float(state.get("lastSearchAt") or 0)
+    if now - last_search < LIVE_EXTERNAL_SEARCH_INTERVAL_SECONDS:
+        print("External live search deferred; hourly search interval has not elapsed", flush=True)
+        return {}
+
+    start_index = int(state.get("nextChannelIndex") or 0) % len(channel_ids)
+    channel_id = next(
+        (
+            channel_ids[(start_index + offset) % len(channel_ids)]
+            for offset in range(len(channel_ids))
+            if channel_ids[(start_index + offset) % len(channel_ids)] not in existing_live_videos
+        ),
+        None,
+    )
+    if not channel_id:
+        return {}
+
+    channel_index = channel_ids.index(channel_id)
+    firebase_put(
+        LIVE_EXTERNAL_SEARCH_STATE_PATH,
+        {
+            "lastSearchAt": now,
+            "nextChannelIndex": (channel_index + 1) % len(channel_ids),
+        },
+    )
+
+    response = youtube_with_rate_limit_handling(
+        "search",
+        {
+            "part": "snippet",
+            "channelId": channel_id,
+            "eventType": "live",
+            "type": "video",
+            "order": "date",
+            "maxResults": 5,
+        },
+    )
+
+    for item in response.get("items", []):
+        video_id = (item.get("id") or {}).get("videoId")
+        snippet = item.get("snippet") or {}
+        if not video_id or snippet.get("liveBroadcastContent") != "live":
             continue
-        try:
-            response = youtube(
-                "search",
-                {
-                    "part": "snippet",
-                    "channelId": channel_id,
-                    "eventType": "live",
-                    "type": "video",
-                    "order": "date",
-                    "maxResults": 5,
-                },
-            )
-        except HTTPError as error:
-            status_code = error.response.status_code if error.response is not None else 0
-            print(f"External live search skipped ({status_code}): {channel_id}", flush=True)
-            if status_code == 429:
-                break
-            continue
-        for item in response.get("items", []):
-            video_id = (item.get("id") or {}).get("videoId")
-            snippet = item.get("snippet") or {}
-            if not video_id or snippet.get("liveBroadcastContent") != "live":
-                continue
-            live_videos[channel_id] = {
+        return {
+            channel_id: {
                 "id": video_id,
                 "title": str(snippet.get("title") or "بث مباشر").strip(),
                 "description": str(snippet.get("description") or "").strip(),
                 "thumbnail": ((snippet.get("thumbnails") or {}).get("high") or {}).get("url", ""),
                 "duration": 0,
             }
-            break
-    return live_videos
+        }
+    return {}
 
 
 def remove_ended_live_articles(articles, live_categories):
