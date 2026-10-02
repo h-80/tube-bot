@@ -125,13 +125,13 @@ def load_categories():
             ("طفل" in name_text or "اطفال" in name_text or "أطفال" in name_text or "كرتون" in name_text)
             and ("بث" in name_text or "مباشر" in name_text)
         )
-        if name and not excluded_series and (category_id not in child_ids or is_kids_live_child):
+        if name and not live and not excluded_series and category_id not in child_ids:
             search_name = " ".join(reversed([part for part in path if part]))
             categories.append({"id": category_id, "name": name, "search_name": search_name, "is_live": live})
     if not categories:
         for category_id, data in raw_categories.items():
             name = str((data or {}).get("name") or (data or {}).get("title") or "").strip()
-            if name and not ("مسلسل" in normalize(name)):
+            if name and not ("مسلسل" in normalize(name)) and "بث" not in normalize(" ".join(category_path(category_id))) and "مباشر" not in normalize(" ".join(category_path(category_id))):
                 path = category_path(category_id)
                 categories.append({"id": category_id, "name": name, "search_name": " ".join(reversed(path)), "is_live": False})
     return categories
@@ -369,17 +369,21 @@ def search_kids_live_video(category, used_ids):
 def get_video_details(video_ids):
     if not video_ids:
         return {}
-    response = requests.get(
-        "https://www.googleapis.com/youtube/v3/videos",
-        params={
-            "part": "snippet,contentDetails",
-            "id": ",".join(video_ids),
-            "key": YOUTUBE_API_KEY,
-        },
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    return {item["id"]: item for item in response.json().get("items", [])}
+    details = {}
+    for start in range(0, len(video_ids), 50):
+        batch = video_ids[start:start + 50]
+        response = requests.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={
+                "part": "snippet,contentDetails",
+                "id": ",".join(batch),
+                "key": YOUTUBE_API_KEY,
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        details.update({item["id"]: item for item in response.json().get("items", [])})
+    return details
 
 
 def cleanup_unavailable_videos():
@@ -388,14 +392,30 @@ def cleanup_unavailable_videos():
         return
 
     articles = load_articles()
+    raw_categories = firebase_get("categories") or {}
+
+    def category_is_live(category_id):
+        visited = set()
+        current_id = category_id
+        path = []
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            data = raw_categories.get(current_id) or {}
+            path.append(str(data.get("name") or data.get("title") or ""))
+            current_id = data.get("parentId")
+        path_text = normalize(" ".join(path))
+        return "بث" in path_text or "مباشر" in path_text
+
     live_category_ids = {
-        category["id"]
-        for category in load_categories()
-        if category.get("is_live")
+        category_id
+        for category_id in raw_categories
+        if category_is_live(category_id)
     }
     references = {}
     for article_id, article in articles.items():
         article = article or {}
+        if article.get("isLive") is True or article.get("categoryId") in live_category_ids:
+            continue
         video_id = extract_video_id(article)
         if video_id:
             references[video_id] = {
@@ -427,6 +447,8 @@ def cleanup_unavailable_videos():
     checked_direct = set()
     for article_id, article in articles.items():
         article = article or {}
+        if article.get("isLive") is True or article.get("categoryId") in live_category_ids:
+            continue
         urls = direct_video_urls(article)
         if not urls or article_id in checked_direct:
             continue
@@ -458,12 +480,18 @@ def search_video(category, used_ids):
     if live:
         params["eventType"] = "live"
 
-    response = requests.get(
-        "https://www.googleapis.com/youtube/v3/search",
-        params=params,
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
+    try:
+        response = requests.get(
+            "https://www.googleapis.com/youtube/v3/search",
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        if error.response is not None and error.response.status_code == 429:
+            log("YouTube search rate/quota limit reached; skipping this cycle")
+            return None
+        raise
     items = response.json().get("items", [])
     candidate_ids = [
         (item.get("id") or {}).get("videoId")
@@ -561,8 +589,16 @@ def run_once():
     if not categories:
         raise RuntimeError("No eligible categories found")
 
-    category = choose_category(categories)
     used_ids = used_video_ids(load_articles())
+    kids_category = next((category for category in categories if is_kids_live_category(category)), None)
+    if kids_category:
+        log(f"Checking kids live sources: {kids_category['name']}")
+        kids_video = search_kids_live_video(kids_category, used_ids)
+        if kids_video:
+            publish_video(kids_category, kids_video)
+            return
+
+    category = choose_category(categories)
     log(f"Searching one video for: {category['name']}")
     video = search_kids_live_video(category, used_ids) if is_kids_live_category(category) else search_video(category, used_ids)
     if not video:
